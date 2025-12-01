@@ -11,8 +11,8 @@ try:
 except Exception:
     pass
 
-st.set_page_config(page_title="이미지 설명 챗봇", page_icon="🖼️", layout="centered")
-st.title("🖼️ 이미지 설명 챗봇 (Azure OpenAI)")
+st.set_page_config(page_title="고슨트", page_icon="🖼️", layout="centered")
+st.title("🖼️ 혼자 보는 미술관을 위한 AI 도슨트, 고슨트 (고요 + 도슨트)")
 
 # -------------------------
 # 환경변수 / Secrets
@@ -192,6 +192,7 @@ if (send_clicked or regen_clicked) and uploaded is not None:
             st.exception(e)
 else:
     st.caption("이미지 업로드 후 전송 또는 ‘답변 다시 생성’을 눌러주세요.")
+
 
 
 
