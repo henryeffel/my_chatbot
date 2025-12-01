@@ -4,9 +4,7 @@ import hashlib
 import streamlit as st
 from openai import AzureOpenAI
 
-# -------------------------
-# (선택) 로컬 개발용 .env 지원: 배포에서 없어도 안 터지게
-# -------------------------
+# (선택) 로컬 개발용 .env 지원: 배포에서 없어도 안 죽게
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,7 +15,7 @@ st.set_page_config(page_title="이미지 설명 챗봇", page_icon="🖼️", la
 st.title("🖼️ 이미지 설명 챗봇 (Azure OpenAI)")
 
 # -------------------------
-# 환경변수(또는 Streamlit Secrets)에서 읽기
+# 환경변수 / Secrets
 # -------------------------
 azure_oai_endpoint = os.getenv("AZURE_OAI_ENDPOINT")
 azure_oai_key = os.getenv("AZURE_OAI_KEY")
@@ -34,7 +32,7 @@ client = AzureOpenAI(
 )
 
 # -------------------------
-# 프롬프트 템플릿 (가볍게, 티 많이 남게)
+# 프롬프트
 # -------------------------
 SYSTEM_GENERAL = (
     "너는 사용자가 이미지를 이해하도록 돕는 친절한 AI 도우미다. "
@@ -60,8 +58,9 @@ SYSTEM_CURATOR = (
     "- 추정: ...\n"
 )
 
+# 인스타 감상문(MZ + 해시태그, 단 작가/전시/작품명은 모르면 안 지어냄)
 SYSTEM_SNS = (
-    "너는 인스타그램 감상평을 잘 쓰는 작성자다. 한국어로 MZ스럽고 트렌디하게, "
+    "너는 인스타그램 감상평을 잘 쓰는 작성자다. 한국어로 트렌디하게, "
     "짧게(4~7줄) 쓰고 마지막에 해시태그 8~15개를 붙인다.\n"
     "중요 규칙:\n"
     "1) 이미지에서 확실히 알 수 없는 작가명/작품명/전시명/장소/연도는 절대 지어내지 마라.\n"
@@ -78,36 +77,26 @@ SYSTEM_SNS = (
     "#추정_... #추정_...\n"
 )
 
-# 1차 관찰 메모(2단계 리라이트용): 환각 줄이는 안전장치
-SYSTEM_OBSERVE = (
-    "너는 매우 신중한 시각 분석가다. 이미지에서 '보이는 사실'만 추출한다.\n"
-    "반드시 아래 JSON 비슷한 형태로만 작성:\n"
-    "FACTS: (관찰 가능한 사실 bullet)\n"
-    "STYLE_GUESSES: (가능한 사조/스타일 추정 bullet, 반드시 '추정' 표기)\n"
-    "UNSURE: (확신 못하는 것 bullet)\n"
-)
+# -------------------------
+# 유틸
+# -------------------------
+APP_CACHE_VERSION = "v1"  # 코드 바꿨을 때 캐시 키 무효화용(원하면 값 바꾸세요)
 
-SYSTEM_REWRITE = (
-    "너는 글을 다듬는 편집자다. 아래 '관찰 메모'에 들어있는 내용만 사용해서, "
-    "요청한 톤과 포맷으로 최종 답변을 만든다. "
-    "관찰 메모에 없는 새로운 사실(작가/작품명/연도 등)은 추가하지 마라."
-)
-
-def _data_url_from_upload(uploaded):
+def data_url_from_upload(uploaded):
     img_bytes = uploaded.getvalue()
     mime = uploaded.type or "application/octet-stream"
     b64 = base64.b64encode(img_bytes).decode("ascii")
-    return f"data:{mime};base64,{b64}", img_bytes, mime
+    return f"data:{mime};base64,{b64}", img_bytes
 
-def _cache_key(img_bytes: bytes, prompt: str, mode: str, two_pass: bool):
+def cache_key(img_bytes: bytes, prompt: str, mode: str):
     h = hashlib.sha256()
+    h.update(APP_CACHE_VERSION.encode("utf-8"))
     h.update(img_bytes)
     h.update(prompt.encode("utf-8"))
     h.update(mode.encode("utf-8"))
-    h.update(str(two_pass).encode("utf-8"))
     return h.hexdigest()
 
-def _call_chat(messages, max_tokens=800, temperature=0.7, top_p=0.95):
+def call_chat(messages, max_tokens=800, temperature=0.7, top_p=0.95):
     completion = client.chat.completions.create(
         model=azure_oai_deployment,
         messages=messages,
@@ -118,95 +107,91 @@ def _call_chat(messages, max_tokens=800, temperature=0.7, top_p=0.95):
     return completion.choices[0].message.content
 
 # -------------------------
-# UI (미니지만 제품처럼 보이게)
+# 상태(캐시)
+# -------------------------
+if "result_cache" not in st.session_state:
+    st.session_state["result_cache"] = {}
+
+# -------------------------
+# UI
 # -------------------------
 with st.sidebar:
     st.header("⚙️ 설정")
     mode = st.selectbox("모드", ["일반 설명", "큐레이터 해설", "SNS 감상문"], index=1)
-    two_pass = st.checkbox("2단계 리라이트(더 그럴듯하게)", value=True)
     st.caption(f"모델: `{azure_oai_deployment}`")
+    if st.button("🧹 캐시 비우기"):
+        st.session_state["result_cache"].clear()
+        st.success("캐시를 비웠습니다.")
 
 uploaded = st.file_uploader("이미지 업로드", type=["png", "jpg", "jpeg", "webp"])
-prompt = st.text_input("질문", value="이 이미지(또는 작품)를 큐레이터처럼 설명해줘.")
+prompt_default = "이 사진 설명해봐." if mode != "큐레이터 해설" else "이 이미지(또는 작품)를 큐레이터처럼 설명해줘."
+prompt = st.text_input("질문", value=prompt_default)
 
 if uploaded is not None:
     st.image(uploaded, caption="업로드된 이미지", use_container_width=True)
 
-# 간단 캐시(세션)
-if "result_cache" not in st.session_state:
-    st.session_state["result_cache"] = {}
+col1, col2 = st.columns(2)
+send_clicked = col1.button("전송")
+regen_clicked = col2.button("답변 다시 생성 🔄", help="캐시를 무시하고 모델을 다시 호출합니다.")
 
-if st.button("전송") and uploaded is not None:
-    data_url, img_bytes, mime = _data_url_from_upload(uploaded)
-    ck = _cache_key(img_bytes, prompt, mode, two_pass)
+# -------------------------
+# 실행
+# -------------------------
+if (send_clicked or regen_clicked) and uploaded is not None:
+    force_regen = regen_clicked  # ✅ 다시 생성이면 캐시 무시
 
-    if ck in st.session_state["result_cache"]:
+    data_url, img_bytes = data_url_from_upload(uploaded)
+    ck = cache_key(img_bytes, prompt, mode)
+
+    # ✅ 캐시 재사용(단, 다시 생성이면 무시)
+    if (not force_regen) and (ck in st.session_state["result_cache"]):
         st.subheader("결과(캐시)")
         st.write(st.session_state["result_cache"][ck])
         st.stop()
 
-    with st.spinner("해설 만드는 중... 큐레이터가 전시실 뛰어오는 중입니다 🏃‍♂️"):
-        try:
-            # 모드별 시스템 프롬프트
-            if mode == "일반 설명":
-                system = SYSTEM_GENERAL
-                max_tokens = 700
-                temperature = 0.5
-            elif mode == "큐레이터 해설":
-                system = SYSTEM_CURATOR
-                max_tokens = 900
-                temperature = 0.6
-            else:
-                system = SYSTEM_SNS
-                max_tokens = 250
-                temperature = 0.8
+    # 모드별 프롬프트/기본 파라미터
+    if mode == "일반 설명":
+        system = SYSTEM_GENERAL
+        base_temp = 0.5
+        max_tokens = 700
+    elif mode == "큐레이터 해설":
+        system = SYSTEM_CURATOR
+        base_temp = 0.6
+        max_tokens = 900
+    else:
+        system = SYSTEM_SNS
+        base_temp = 0.8
+        max_tokens = 300
 
-            if not two_pass:
-                # 1-pass: 바로 답변
-                messages = [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": [
+    # ✅ 다시 생성일 때만 temperature 살짝 올리기(변주 강화)
+    temperature = min(base_temp + (0.2 if force_regen else 0.0), 1.2)
+
+    with st.spinner("생성 중... 모델도 사람처럼 컨디션이 있습니다(농담)."):
+        try:
+            messages = [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": [
                         {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": data_url}},
-                    ]},
-                ]
-                out = _call_chat(messages, max_tokens=max_tokens, temperature=temperature)
+                    ],
+                },
+            ]
 
-            else:
-                # 2-pass: (1) 관찰 메모 → (2) 최종 작성
-                observe_messages = [
-                    {"role": "system", "content": SYSTEM_OBSERVE},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": "이미지에서 보이는 사실만 추출해줘."},
-                        {"type": "image_url", "image_url": {"url": data_url}},
-                    ]},
-                ]
-                memo = _call_chat(observe_messages, max_tokens=600, temperature=0.2)
+            out = call_chat(messages, max_tokens=max_tokens, temperature=temperature)
 
-                final_messages = [
-                    {"role": "system", "content": SYSTEM_REWRITE},
-                    {"role": "user", "content": (
-                        f"요청 모드: {mode}\n\n"
-                        f"원래 질문: {prompt}\n\n"
-                        f"관찰 메모:\n{memo}\n\n"
-                        f"이 관찰 메모에 있는 내용만 사용해서 최종 답변을 작성해줘.\n"
-                        f"큐레이터 모드면 지정 포맷을 지켜줘."
-                    )},
-                    {"role": "system", "content": system},
-                ]
-                out = _call_chat(final_messages, max_tokens=max_tokens, temperature=temperature)
-
-                with st.expander("🔎 1차 관찰 메모(숨김)", expanded=False):
-                    st.code(memo)
-
-            st.subheader("결과")
+            st.subheader("결과(새로 생성)" if force_regen else "결과")
             st.write(out)
+
+            # ✅ 새 결과로 캐시 갱신(덮어쓰기)
             st.session_state["result_cache"][ck] = out
 
         except Exception as e:
             st.error("호출 실패")
             st.exception(e)
 else:
-    st.caption("이미지 업로드 후 전송을 눌러주세요.")
+    st.caption("이미지 업로드 후 전송 또는 ‘답변 다시 생성’을 눌러주세요.")
+
 
 
